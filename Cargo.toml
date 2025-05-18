@@ -10,3 +10,18 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.11", features = ["blocking"] }
 url = "2.4"
+
+[package.metadata.bundle]
+name = "Click-To-Call"
+identifier = "com.click-to-call.app"
+icon = ["assets/logo.png"]
+version = "1.0.0"
+copyright = "© 2024"
+category = "Utility"
+short_description = "Click-To-Call for FusionPBX"
+osx_minimum_system_version = "10.14"
+resources = ["assets/logo.png"]
+
+# Tell cargo-bundle to rename the binary to match the bundle name
+[package.metadata.bundle.bin.click-to-call]
+name = "Click-To-Call"

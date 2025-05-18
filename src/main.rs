@@ -2,7 +2,6 @@ use druid::widget::{Button, Checkbox, Flex, Label, TextBox};
 use druid::{AppLauncher, Data, Env, Lens, LocalizedString, PlatformError, Widget, WidgetExt, WindowDesc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use url::Url;
 use std::thread;
 
 // Application data model
@@ -88,7 +87,7 @@ impl Lens<AppState, String> for StatusMessageLens {
 fn main() -> Result<(), PlatformError> {
     // Create the main window
     let main_window = WindowDesc::new(build_ui())
-        .title(LocalizedString::new("Click to Call - FusionPBX"))
+        .title(LocalizedString::new("Click-To-Call"))
         .window_size((400.0, 350.0));
 
     // Load saved preferences or use defaults
