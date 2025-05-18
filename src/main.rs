@@ -256,6 +256,7 @@ impl AppDelegate<AppState> for Delegate {
             // If this is the primary instance, start the socket listener
             if self.is_primary {
                 let event_sink = ctx.get_external_handle();
+                let app_state = data.clone(); // Clone the current app state
                 
                 // Start the socket listener in a separate thread
                 thread::spawn(move || {
@@ -273,12 +274,48 @@ impl AppDelegate<AppState> for Delegate {
                                         if size > 0 {
                                             if let Ok(message) = String::from_utf8(buffer[0..size].to_vec()) {
                                                 if message.starts_with("tel:") {
-                                                    // Send the phone number to the main thread
-                                                    event_sink.submit_command(
-                                                        PROCESS_TEL_URL, 
-                                                        message, 
-                                                        Target::Auto
-                                                    ).ok();
+                                                    // Hide app from dock when processing tel URLs in socket
+                                                    #[cfg(target_os = "macos")]
+                                                    {
+                                                        use objc::{msg_send, sel, sel_impl};
+                                                        use objc::runtime::{Class, Object};
+                                                        
+                                                        unsafe {
+                                                            // Don't activate the app when processing tel URLs
+                                                            let cls = Class::get("NSApplication").unwrap();
+                                                            let app: *mut Object = msg_send![cls, sharedApplication];
+                                                            let _: () = msg_send![app, setActivationPolicy:1]; // NSApplicationActivationPolicyAccessory = 1
+                                                        }
+                                                    }
+                                                
+                                                    // Extract phone number
+                                                    let raw_number = message.split_at(4).1.to_string();
+                                                    println!("Socket received tel: URL with number: {}", raw_number);
+                                                    
+                                                    // Clean phone number but keep the plus sign
+                                                    let clean_number = raw_number
+                                                        .replace("-", "")
+                                                        .replace(" ", "")
+                                                        .replace("(", "")
+                                                        .replace(")", "");
+                                                    
+                                                    // If we have valid settings, make call directly without UI
+                                                    if !app_state.domain.is_empty() && !app_state.extension.is_empty() {
+                                                        make_direct_call(
+                                                            &app_state.domain,
+                                                            &app_state.extension,
+                                                            &app_state.key,
+                                                            &clean_number,
+                                                            app_state.auto_answer
+                                                        );
+                                                    } else {
+                                                        // Only if settings not configured, send to UI
+                                                        event_sink.submit_command(
+                                                            PROCESS_TEL_URL, 
+                                                            message, 
+                                                            Target::Auto
+                                                        ).ok();
+                                                    }
                                                 }
                                             }
                                         }
@@ -301,6 +338,20 @@ impl AppDelegate<AppState> for Delegate {
             return Handled::Yes;
         } else if let Some(url) = cmd.get(PROCESS_TEL_URL) {
             if url.starts_with("tel:") {
+                // On macOS, hide the app from dock when processing tel URLs
+                #[cfg(target_os = "macos")]
+                {
+                    use objc::{msg_send, sel, sel_impl};
+                    use objc::runtime::{Class, Object};
+                    
+                    unsafe {
+                        // Don't activate the app when processing tel URLs
+                        let cls = Class::get("NSApplication").unwrap();
+                        let app: *mut Object = msg_send![cls, sharedApplication];
+                        let _: () = msg_send![app, setActivationPolicy:1]; // NSApplicationActivationPolicyAccessory = 1
+                    }
+                }
+                
                 // Extract phone number
                 let raw_number = url.split_at(4).1.to_string();
                 println!("Processing tel: URL with number: {}", raw_number);
@@ -314,22 +365,11 @@ impl AppDelegate<AppState> for Delegate {
                 
                 // Process the phone number if the domain and extension are configured
                 if !data.domain.is_empty() && !data.extension.is_empty() {
-                    // Clone clean_number before moving it
+                    // Store the phone number in data for the call
                     data.phone_number = clean_number.clone();
                     data.status_message = format!("Processing tel: URL: {}", raw_number);
                     
-                    // Bring the window to front
-                    #[cfg(target_os = "macos")]
-                    {
-                        use objc::{msg_send, sel, sel_impl};
-                        use objc::runtime::{Class, Object};
-                        
-                        unsafe {
-                            let cls = Class::get("NSApplication").unwrap();
-                            let app: *const Object = msg_send![cls, sharedApplication];
-                            let _: () = msg_send![app, activateIgnoringOtherApps:true];
-                        }
-                    }
+                    // Don't bring window to front, just initiate the call silently
                     
                     // Initiate the call
                     ctx.submit_command(MAKE_CALL);
@@ -358,81 +398,88 @@ impl AppDelegate<AppState> for Delegate {
     }
 }
 
+// Function to make a direct call without involving the UI
+fn make_direct_call(domain: &str, extension: &str, key: &str, phone_number: &str, auto_answer: bool) {
+    println!("Making direct call to {} without showing UI", phone_number);
+    
+    // Clone data we need for the HTTP request
+    let domain = domain.to_string();
+    let extension = extension.to_string();
+    let key = key.to_string();
+    let phone_number = phone_number.to_string();
+    
+    // Spawn a thread for the HTTP request
+    thread::spawn(move || {
+        // Construct the URL
+        let auto_answer_str = if auto_answer { "true" } else { "false" };
+        
+        // Make sure domain doesn't already have https://
+        let domain_with_scheme = if domain.starts_with("http://") || domain.starts_with("https://") {
+            domain
+        } else {
+            format!("https://{}", domain)
+        };
+        
+        // Construct the URL based on the example
+        let url_str = format!(
+            "{}/app/click_to_call/click_to_call.php?src_cid_name={}&src_cid_number={}&dest_cid_name={}&dest_cid_number={}&src={}&dest={}&auto_answer={}&rec=&ringback=us-ring&key={}",
+            domain_with_scheme, phone_number, phone_number, phone_number, phone_number, extension, phone_number, auto_answer_str, key
+        );
+        
+        // Make the HTTP request
+        match Client::new().get(url_str).send() {
+            Ok(response) => {
+                // Check HTTP status code
+                if response.status().is_success() {
+                    show_notification("Call Initiated", &format!("Calling {}...", phone_number));
+                    println!("Call initialized to {}", phone_number);
+                } else {
+                    show_notification("Call Failed", &format!("Failed to call {}: HTTP status {}", phone_number, response.status()));
+                    println!("Error: HTTP status {}", response.status());
+                }
+            },
+            Err(e) => {
+                show_notification("Call Failed", &format!("Failed to call {}: {}", phone_number, e));
+                println!("Error: {}", e);
+            },
+        };
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn hide_app_from_dock() {
+    use objc::{msg_send, sel, sel_impl};
+    use objc::runtime::{Class, Object};
+    
+    unsafe {
+        // Get the shared application
+        let cls = Class::get("NSApplication").unwrap();
+        let app: *mut Object = msg_send![cls, sharedApplication];
+        
+        // Set activation policy to prohibit the app from showing in the Dock
+        let _: () = msg_send![app, setActivationPolicy:1]; // NSApplicationActivationPolicyAccessory = 1
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_app_from_dock() {
+    // No-op for non-macOS platforms
+}
+
 fn main() -> Result<(), PlatformError> {
     // Check if the app is already running
     let socket_path = get_socket_path();
     let is_primary = !try_connect_to_primary(&socket_path);
-    
-    // Register apple event handler for MacOS URL scheme (only for primary instance)
-    #[cfg(target_os = "macos")]
-    if is_primary {
-        use objc::{msg_send, sel, sel_impl};
-        use objc::runtime::{Class, Object, Sel};
-        
-        unsafe {
-            extern "C" fn handle_url_event(_this: &Object, _: Sel, event: *const Object, _: *const Object) {
-                // Apple Event constants
-                const KEY_DIRECT_OBJECT: u32 = 0x2D2D2D2D; // ---- in UTF-8 (keyDirectObject)
-                
-                unsafe {
-                    let desc: *const Object = msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT];
-                    let url_str: *const Object = msg_send![desc, stringValue];
-                    let ns_string: *const Object = msg_send![url_str, UTF8String];
-                    let c_str = std::ffi::CStr::from_ptr(ns_string as *const i8);
-                    
-                    if let Ok(url) = c_str.to_str() {
-                        println!("Received URL: {}", url);
-                        if url.starts_with("tel:") {
-                            // Process within the current instance instead of launching a new one
-                            if let Ok(mut stream) = UnixStream::connect(get_socket_path()) {
-                                let _ = stream.write_all(url.as_bytes());
-                            }
-                        }
-                    }
-                }
-            }
-            
-            let cls = Class::get("NSAppleEventManager").unwrap();
-            let manager: *const Object = msg_send![cls, sharedAppleEventManager];
-            
-            // Register handler for URL events
-            let app_delegate_class = Class::get("NSObject").unwrap();
-            let sel_handle_url = sel!(handleURLEvent:withReplyEvent:);
-            
-            // Apple Event class and ID for URL handling
-            // 'GURL' in UTF-8 (Generic URL)
-            const GURL_EVENT_CLASS: u32 = 0x4755524C; // 'GURL'
-            const GURL_EVENT_ID: u32 = 0x4755524C;    // 'GURL'
-            
-            // Create C string for method signature
-            let types = CString::new("v@:@@").unwrap();
-            
-            class_addMethod(
-                app_delegate_class,
-                sel_handle_url,
-                handle_url_event as extern "C" fn(&Object, Sel, *const Object, *const Object),
-                types.as_ptr()
-            );
-            
-            let delegate: *const Object = msg_send![app_delegate_class, new];
-            let _: () = msg_send![manager, 
-                          setEventHandler:delegate 
-                          andSelector:sel_handle_url 
-                          forEventClass:GURL_EVENT_CLASS 
-                          andEventID:GURL_EVENT_ID];
-        }
-    }
-
-    // Check for tel: URL in app arguments
-    let initial_state = load_preferences();
-    let mut auto_call = false;
-    let mut phone_number = String::new();
     
     // Print all args for debugging
     println!("Received arguments: {:?}", env::args().collect::<Vec<_>>());
     
     // On macOS, the URL is passed through the process arguments
     let args: Vec<String> = env::args().collect();
+    let mut has_tel_url = false;
+    let mut tel_number = String::new();
+    
+    // Check for tel: URL in app arguments
     if args.len() > 1 {
         // Look for tel: URL in all arguments
         for arg in &args[1..] {
@@ -441,16 +488,7 @@ fn main() -> Result<(), PlatformError> {
             // Check for tel: prefix (case insensitive)
             let arg_lower = arg.to_lowercase();
             if arg_lower.starts_with("tel:") {
-                // If this is not the primary instance, try to send the URL to the primary instance
-                if !is_primary {
-                    if let Ok(mut stream) = UnixStream::connect(&socket_path) {
-                        if stream.write_all(arg.as_bytes()).is_ok() {
-                            // Successfully sent to primary instance, exit this one
-                            println!("Sent URL to primary instance and exiting");
-                            return Ok(());
-                        }
-                    }
-                }
+                has_tel_url = true;
                 
                 // Extract phone number
                 let raw_number = arg.split_at(4).1.to_string();
@@ -464,13 +502,79 @@ fn main() -> Result<(), PlatformError> {
                     .replace(")", "");
                 
                 println!("Cleaned number: {}", clean_number);
-                
-                // Store phone number and set auto_call flag
-                phone_number = clean_number;
-                auto_call = true;
+                tel_number = clean_number;
                 break;
             }
         }
+    }
+    
+    // If we're handling a tel: URL and this is a primary instance, hide from dock
+    if has_tel_url && is_primary {
+        hide_app_from_dock();
+    }
+    
+    // Handle the tel: URL if present
+    if has_tel_url {
+        // If this is not the primary instance, try to send the URL to the primary instance
+        if !is_primary {
+            if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+                let url = format!("tel:{}", tel_number);
+                if stream.write_all(url.as_bytes()).is_ok() {
+                    // Successfully sent to primary instance, exit this one
+                    println!("Sent URL to primary instance and exiting");
+                    return Ok(());
+                }
+            } 
+            // If can't connect to socket, try to spawn a background instance
+            else {
+                // Try to spawn a background instance
+                #[cfg(target_os = "macos")]
+                {
+                    use std::process::Command;
+                    
+                    // Determine the path to the current executable
+                    if let Ok(current_exe) = std::env::current_exe() {
+                        println!("Spawning background instance: {:?}", current_exe);
+                        // Launch the app as a background process
+                        let _ = Command::new("open")
+                            .arg("-g") // -g makes it open in the background
+                            .arg(current_exe)
+                            .spawn();
+                        
+                        // Wait a moment for the process to start
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                        
+                        // Try to connect to the socket again
+                        if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+                            let url = format!("tel:{}", tel_number);
+                            if stream.write_all(url.as_bytes()).is_ok() {
+                                println!("Sent URL to newly spawned instance and exiting");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Process the tel: URL directly
+        let app_state = load_preferences();
+        
+        // If domain and extension are configured, make call without showing the UI
+        if !app_state.domain.is_empty() && !app_state.extension.is_empty() {
+            // Make a direct call without showing the UI
+            make_direct_call(&app_state.domain, &app_state.extension, &app_state.key, &tel_number, app_state.auto_answer);
+            return Ok(());
+        }
+        
+        // If we get here, we need to show the UI to configure settings
+        println!("Settings not configured, need to show UI");
+    }
+    
+    // Register apple event handler for MacOS URL scheme (only for primary instance)
+    #[cfg(target_os = "macos")]
+    if is_primary {
+        configure_apple_event_handler();
     }
 
     // Create the main window
@@ -479,16 +583,12 @@ fn main() -> Result<(), PlatformError> {
         .window_size((400.0, 350.0));
 
     // Set up app state
-    let mut app_state = initial_state;
-    if auto_call {
-        // Only set status message; actual phone number will be set by delegate
-        app_state.status_message = format!("Received tel: link. Ready to call: {}", phone_number);
-    }
+    let mut initial_state = load_preferences();
     
-    // Create delegate with auto_call info
+    // Create delegate with proper flags
     let delegate = Delegate {
-        auto_call,
-        phone_number,
+        auto_call: false,
+        phone_number: String::new(),
         is_primary,
     };
     
@@ -497,8 +597,111 @@ fn main() -> Result<(), PlatformError> {
         .delegate(delegate)
         .log_to_console();
     
-    launcher.launch(app_state)?;
+    launcher.launch(initial_state)?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_apple_event_handler() {
+    use objc::{msg_send, sel, sel_impl};
+    use objc::runtime::{Class, Object, Sel};
+    
+    unsafe {
+        extern "C" fn handle_url_event(_this: &Object, _: Sel, event: *const Object, _: *const Object) {
+            // Apple Event constants
+            const KEY_DIRECT_OBJECT: u32 = 0x2D2D2D2D; // ---- in UTF-8 (keyDirectObject)
+            
+            unsafe {
+                let desc: *const Object = msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT];
+                let url_str: *const Object = msg_send![desc, stringValue];
+                let ns_string: *const Object = msg_send![url_str, UTF8String];
+                let c_str = std::ffi::CStr::from_ptr(ns_string as *const i8);
+                
+                if let Ok(url) = c_str.to_str() {
+                    println!("Received URL: {}", url);
+                    if url.starts_with("tel:") {
+                        // Hide the app from dock when processing tel URLs
+                        hide_app_from_dock();
+                        
+                        // Try to connect to existing instance
+                        let socket_path = get_socket_path();
+                        if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+                            // If connection succeeds, send the URL and we're done
+                            if stream.write_all(url.as_bytes()).is_ok() {
+                                println!("Sent URL to existing instance");
+                                return;
+                            }
+                        }
+                        
+                        // If we couldn't connect, try to handle it directly
+                        if url.starts_with("tel:") {
+                            // Extract phone number
+                            let raw_number = url.split_at(4).1.to_string();
+                            
+                            // Clean phone number but keep the plus sign
+                            let clean_number = raw_number
+                                .replace("-", "")
+                                .replace(" ", "")
+                                .replace("(", "")
+                                .replace(")", "");
+                            
+                            // Load preferences and check if we can make a direct call
+                            if let Some(config_dir) = dirs::config_dir() {
+                                let prefs_path = config_dir.join("click-to-call").join("preferences.json");
+                                
+                                if let Ok(content) = std::fs::read_to_string(prefs_path) {
+                                    if let Ok(app_state) = serde_json::from_str::<AppState>(&content) {
+                                        if !app_state.domain.is_empty() && !app_state.extension.is_empty() {
+                                            // Make the call without showing UI
+                                            let domain = app_state.domain.clone();
+                                            let extension = app_state.extension.clone();
+                                            let key = app_state.key.clone();
+                                            let auto_answer = app_state.auto_answer;
+                                            
+                                            std::thread::spawn(move || {
+                                                // Directly call the API endpoint
+                                                make_direct_call(&domain, &extension, &key, &clean_number, auto_answer);
+                                            });
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        let cls = Class::get("NSAppleEventManager").unwrap();
+        let manager: *const Object = msg_send![cls, sharedAppleEventManager];
+        
+        // Register handler for URL events
+        let app_delegate_class = Class::get("NSObject").unwrap();
+        let sel_handle_url = sel!(handleURLEvent:withReplyEvent:);
+        
+        // Apple Event class and ID for URL handling
+        // 'GURL' in UTF-8 (Generic URL)
+        const GURL_EVENT_CLASS: u32 = 0x4755524C; // 'GURL'
+        const GURL_EVENT_ID: u32 = 0x4755524C;    // 'GURL'
+        
+        // Create C string for method signature
+        let types = CString::new("v@:@@").unwrap();
+        
+        class_addMethod(
+            app_delegate_class,
+            sel_handle_url,
+            handle_url_event as extern "C" fn(&Object, Sel, *const Object, *const Object),
+            types.as_ptr()
+        );
+        
+        let delegate: *const Object = msg_send![app_delegate_class, new];
+        let _: () = msg_send![manager, 
+                      setEventHandler:delegate 
+                      andSelector:sel_handle_url 
+                      forEventClass:GURL_EVENT_CLASS 
+                      andEventID:GURL_EVENT_ID];
+    }
 }
 
 // Try to connect to a primary instance
