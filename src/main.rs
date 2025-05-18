@@ -24,6 +24,51 @@ const APP_INITIALIZED: Selector = Selector::new("app.initialized");
 // Command to process external tel: URL
 const PROCESS_TEL_URL: Selector<String> = Selector::new("app.process-tel-url");
 
+// Function to show a notification
+#[cfg(target_os = "macos")]
+fn show_notification(title: &str, message: &str) {
+    use objc::{msg_send, sel, sel_impl};
+    use objc::runtime::{Class, Object};
+    
+    println!("Showing notification - Title: '{}', Message: '{}'", title, message);
+    
+    unsafe {
+        // Create a completely new notification center approach
+        let app = Class::get("NSApplication").unwrap();
+        let app_instance: *mut Object = msg_send![app, sharedApplication];
+        
+        // Create a user notification
+        let notification_class = Class::get("NSUserNotification").unwrap();
+        let notification: *mut Object = msg_send![notification_class, new];
+        
+        // Create NSString objects from Rust strings
+        let ns_string_class = Class::get("NSString").unwrap();
+        let title_str = std::ffi::CString::new(title).unwrap();
+        let message_str = std::ffi::CString::new(message).unwrap();
+        let ns_title: *mut Object = msg_send![ns_string_class, stringWithUTF8String:title_str.as_ptr()];
+        let ns_message: *mut Object = msg_send![ns_string_class, stringWithUTF8String:message_str.as_ptr()];
+        
+        // Set properties on the notification
+        let _: () = msg_send![notification, setTitle: ns_title];
+        let _: () = msg_send![notification, setInformativeText: ns_message];
+        
+        // Get notification center
+        let center_class = Class::get("NSUserNotificationCenter").unwrap();
+        let center: *mut Object = msg_send![center_class, defaultUserNotificationCenter];
+        
+        // Remove existing notifications first
+        let _: () = msg_send![center, removeAllDeliveredNotifications];
+        
+        // Deliver notification
+        let _: () = msg_send![center, deliverNotification: notification];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_notification(_title: &str, _message: &str) {
+    // Placeholder for other platforms
+}
+
 // Socket path for inter-process communication
 fn get_socket_path() -> PathBuf {
     dirs::runtime_dir()
@@ -167,8 +212,26 @@ impl AppDelegate<AppState> for Delegate {
                 
                 // Make the HTTP request
                 let result = match Client::new().get(url_str).send() {
-                    Ok(_) => format!("Call initialized to {}", phone_number),
-                    Err(e) => format!("Error: {}", e),
+                    Ok(response) => {
+                        // Check HTTP status code
+                        if response.status().is_success() {
+                            let success_msg = format!("Call initialized to {}", phone_number);
+                            // Show success notification
+                            show_notification("Call Initiated", &format!("Calling {}...", phone_number));
+                            success_msg
+                        } else {
+                            let error_msg = format!("Error: HTTP status {}", response.status());
+                            // Show error notification
+                            show_notification("Call Failed", &format!("Failed to call {}: HTTP status {}", phone_number, response.status()));
+                            error_msg
+                        }
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Error: {}", e);
+                        // Show error notification
+                        show_notification("Call Failed", &format!("Failed to call {}: {}", phone_number, e));
+                        error_msg
+                    },
                 };
                 
                 // Update the UI with the result
@@ -251,7 +314,8 @@ impl AppDelegate<AppState> for Delegate {
                 
                 // Process the phone number if the domain and extension are configured
                 if !data.domain.is_empty() && !data.extension.is_empty() {
-                    data.phone_number = clean_number;
+                    // Clone clean_number before moving it
+                    data.phone_number = clean_number.clone();
                     data.status_message = format!("Processing tel: URL: {}", raw_number);
                     
                     // Bring the window to front
@@ -566,4 +630,5 @@ extern "C" {
         imp: extern "C" fn(&objc::runtime::Object, objc::runtime::Sel, *const objc::runtime::Object, *const objc::runtime::Object),
         types: *const libc::c_char,
     ) -> bool;
+    // We still need this for URL handling, but not for notifications
 }
