@@ -172,6 +172,8 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "druid",
+ "libc",
+ "objc",
  "reqwest",
  "serde",
  "serde_json",
