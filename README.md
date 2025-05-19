@@ -10,7 +10,7 @@ Enter key and extension.
 Open FaceTime app > Settings and change the default app to "Click-To-Call"  
 Click on any `tel:` link (for Firefox you'll have to accept and approve, tick always allow / open)
 
-Click-To-Call initiates an `HTTP GET` request to your FusionPBX server and places a call using the extension provided in settings. This is not a SIP phone and rather initiates a call from your extension (desk phone / soft phone) to the destination number (click), with option to auto-answer the initiated call.   
+Click-To-Call initiates a `HTTP GET` request to your FusionPBX server and places a call using the extension provided in settings. This is not a SIP phone and rather initiates a call from your extension (desk phone / soft phone) to the destination number (clicked number), with option to auto-answer the initiated call.   
 ![photo-2025-05-19-20-04-33](https://github.com/user-attachments/assets/58c857f9-a164-49bf-ab5c-44cf0b270643)
 
 
