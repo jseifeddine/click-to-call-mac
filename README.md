@@ -1,5 +1,6 @@
 
 # Click-To-Call - FusionPBX (Mac OS X)
+![Screenshot 2025-05-19 at 20 58 09](https://github.com/user-attachments/assets/4641841c-2472-4f7d-a4c9-0a2301ddac1f)
 
 ## Using the app  
 Install the latest release in /Applications  
@@ -10,6 +11,7 @@ Open FaceTime app > Settings and change the default app to "Click-To-Call"
 Click on any `tel:` link (for Firefox you'll have to accept and approve, tick always allow / open)
 
 Click-To-Call initiates a HTTP GET request to your FusionPBX server and places a call using the extension provided in settings. This is not a SIP phone, this utilizes your connected SIP extension and initiates the call, with option to auto-answer the initiated call. 
+![photo-2025-05-19-20-04-33](https://github.com/user-attachments/assets/58c857f9-a164-49bf-ab5c-44cf0b270643)
 
 
 ## Overview
